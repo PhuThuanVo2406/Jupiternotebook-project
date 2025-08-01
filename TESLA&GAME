@@ -1,1 +1,141 @@
 # project
+import yfinance as yf
+import pandas as pd
+import requests
+from bs4 import BeautifulSoup
+import matplotlib.pyplot as plt
+
+# ------------- Q1: Extracting Tesla Stock Data ------------------
+tesla = yf.Ticker("TSLA")
+tesla_data = tesla.history(period="max")
+tesla_data.reset_index(inplace=True)
+print("Tesla Stock Data - Last 5 Rows")
+print(tesla_data.tail())
+
+# ------------- Q2: Extracting Tesla Revenue Data ----------------
+url_tesla = "https://www.macrotrends.net/stocks/charts/TSLA/tesla/revenue"
+response = requests.get(url_tesla, headers={"User-Agent": "Mozilla/5.0"})
+soup = BeautifulSoup(response.text, "html.parser")
+tables = soup.find_all("table")
+
+revenue_table_tesla = None
+for table in tables:
+    if "Tesla Quarterly Revenue" in table.get_text():
+        revenue_table_tesla = table
+        break
+
+if revenue_table_tesla:
+    tesla_revenue = pd.read_html(str(revenue_table_tesla))[0]
+    tesla_revenue.columns = ["Date", "Revenue"]
+    tesla_revenue.dropna(inplace=True)
+    tesla_revenue["Revenue"] = tesla_revenue["Revenue"].str.replace("$", "").str.replace(",", "")
+    tesla_revenue["Revenue"] = pd.to_numeric(tesla_revenue["Revenue"], errors='coerce')
+    tesla_revenue["Date"] = pd.to_datetime(tesla_revenue["Date"])
+    print("\nTesla Revenue Data - Last 5 Rows")
+    print(tesla_revenue.tail())
+else:
+    print("Tesla revenue table not found.")
+    tesla_revenue = pd.DataFrame(columns=["Date", "Revenue"])
+
+
+
+
+# ------------- Q3: Extracting GameStop Stock Data ----------------
+gme = yf.Ticker("GME")
+gme_data = gme.history(period="max")
+gme_data.reset_index(inplace=True)
+print("\nGameStop Stock Data - First 5 Rows")
+print(gme_data.head())
+
+
+# ------------- Q4: Extracting GameStop Revenue Data ----------------
+url_gme = "https://www.macrotrends.net/stocks/charts/GME/gamestop/revenue"
+response_gme = requests.get(url_gme, headers={"User-Agent": "Mozilla/5.0"})
+soup_gme = BeautifulSoup(response_gme.text, "html.parser")
+tables_gme = soup_gme.find_all("table")
+
+revenue_table_gme = None
+for table in tables_gme:
+    if "GameStop Quarterly Revenue" in table.get_text():
+        revenue_table_gme = table
+        break
+
+if revenue_table_gme:
+    gme_revenue = pd.read_html(str(revenue_table_gme))[0]
+    gme_revenue.columns = ["Date", "Revenue"]
+    gme_revenue.dropna(inplace=True)
+    gme_revenue["Revenue"] = gme_revenue["Revenue"].str.replace("$", "").str.replace(",", "")
+    gme_revenue["Revenue"] = pd.to_numeric(gme_revenue["Revenue"], errors='coerce')
+    gme_revenue["Date"] = pd.to_datetime(gme_revenue["Date"])
+    print("\nGameStop Revenue Data - Last 5 Rows")
+    print(gme_revenue.tail())
+else:
+    print("GameStop revenue table not found.")
+    gme_revenue = pd.DataFrame(columns=["Date", "Revenue"])
+
+
+import yfinance as yf
+import pandas as pd
+import matplotlib.pyplot as plt
+import requests
+from bs4 import BeautifulSoup
+
+# Ensure you install required packages:
+# pip install yfinance pandas matplotlib beautifulsoup4 lxml
+
+# Get TSLA stock data
+tesla = yf.Ticker("TSLA")
+tesla_data = tesla.history(period="max")
+tesla_data.reset_index(inplace=True)
+
+print("✅ Tesla stock data loaded")
+print(tesla_data.tail())
+
+
+
+# ------------------ Q5: Tesla Dashboard ------------------
+def make_graph(stock_data, revenue_data, stock_name):
+    fig, ax1 = plt.subplots(figsize=(14, 6))
+    plt.title(f"{stock_name} Stock Price & Revenue", fontsize=16)
+
+    ax1.plot(stock_data["Date"], stock_data["Close"], color="blue", label="Stock Price")
+    ax1.set_xlabel("Date")
+    ax1.set_ylabel("Stock Price (USD)", color="blue")
+    ax1.tick_params(axis="y", labelcolor="blue")
+
+    ax2 = ax1.twinx()
+    ax2.plot(revenue_data["Date"], revenue_data["Revenue"], color="green", label="Revenue")
+    ax2.set_ylabel("Revenue (USD Millions)", color="green")
+    ax2.tick_params(axis="y", labelcolor="green")
+
+    plt.grid(True)
+    fig.tight_layout()
+    plt.show()
+
+# Plot Tesla dashboard
+make_graph(tesla_data, tesla_revenue, "Tesla")
+
+
+#########Q6 #######################
+def make_graph(stock_data, revenue_data, stock_name):
+    fig, ax1 = plt.subplots(figsize=(14, 6))
+    plt.title(f"{stock_name} Stock Price & Revenue", fontsize=16)
+
+    ax1.plot(stock_data["Date"], stock_data["Close"], color="red", label="Stock Price")
+    ax1.set_xlabel("Date")
+    ax1.set_ylabel("Stock Price (USD)", color="red")
+    ax1.tick_params(axis="y", labelcolor="red")
+
+    ax2 = ax1.twinx()
+    ax2.plot(revenue_data["Date"], revenue_data["Revenue"], color="blue", label="Revenue")
+    ax2.set_ylabel("Revenue (USD Millions)", color="blue")
+    ax2.tick_params(axis="y", labelcolor="blue")
+
+    plt.grid(True)
+    fig.tight_layout()
+    plt.show()
+
+# Plot GameStop dashboard
+make_graph(gme_data, gme_revenue, "GameStop")
+
+
