@@ -88,7 +88,7 @@ tesla = yf.Ticker("TSLA")
 tesla_data = tesla.history(period="max")
 tesla_data.reset_index(inplace=True)
 
-print("✅ Tesla stock data loaded")
+print("Tesla stock data loaded")
 print(tesla_data.tail())
 
 
