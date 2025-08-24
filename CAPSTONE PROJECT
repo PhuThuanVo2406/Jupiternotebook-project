@@ -1,0 +1,987 @@
+##### DATA COLLECTION
+
+
+!pip install requests pandas numpy
+
+import requests
+import pandas as pd
+import numpy as np
+import datetime
+
+# Display full DataFrame columns
+pd.set_option('display.max_columns', None)
+pd.set_option('display.max_colwidth', None)
+
+# ---------- API CALL ----------
+spacex_url = "https://api.spacexdata.com/v4/launches/past"
+response = requests.get(spacex_url)
+data = pd.DataFrame(response.json())
+
+# Keep only the features we want
+data = data[['rocket', 'payloads', 'launchpad', 'cores', 'flight_number', 'date_utc']]
+
+# Filter out rows with multiple cores/payloads
+data = data[data['cores'].map(len) == 1]
+data = data[data['payloads'].map(len) == 1]
+
+# Extract single values from lists
+data['cores'] = data['cores'].map(lambda x: x[0])
+data['payloads'] = data['payloads'].map(lambda x: x[0])
+
+# Convert UTC to date only
+data['date'] = pd.to_datetime(data['date_utc']).dt.date
+
+# Restrict to before Nov 13, 2020
+data = data[data['date'] <= datetime.date(2020, 11, 13)]
+
+# ---------- Global lists ----------
+BoosterVersion, PayloadMass, Orbit, LaunchSite = [], [], [], []
+Outcome, Flights, GridFins, Reused, Legs, LandingPad = [], [], [], [], [], []
+Block, ReusedCount, Serial, Longitude, Latitude = [], [], [], [], []
+
+# ---------- Functions ----------
+def getBoosterVersion(data):
+    for x in data['rocket']:
+        if x:
+            response = requests.get("https://api.spacexdata.com/v4/rockets/"+str(x)).json()
+            BoosterVersion.append(response['name'])
+
+def getLaunchSite(data):
+    for x in data['launchpad']:
+        if x:
+            response = requests.get("https://api.spacexdata.com/v4/launchpads/"+str(x)).json()
+            Longitude.append(response['longitude'])
+            Latitude.append(response['latitude'])
+            LaunchSite.append(response['name'])
+
+def getPayloadData(data):
+    for load in data['payloads']:
+        if load:
+            response = requests.get("https://api.spacexdata.com/v4/payloads/"+str(load)).json()
+            PayloadMass.append(response.get('mass_kg'))
+            Orbit.append(response.get('orbit'))
+
+def getCoreData(data):
+    for core in data['cores']:
+        if core['core'] is not None:
+            response = requests.get("https://api.spacexdata.com/v4/cores/"+core['core']).json()
+            Block.append(response.get('block'))
+            ReusedCount.append(response.get('reuse_count'))
+            Serial.append(response.get('serial'))
+        else:
+            Block.append(None)
+            ReusedCount.append(None)
+            Serial.append(None)
+        Outcome.append(str(core['landing_success'])+' '+str(core['landing_type']))
+        Flights.append(core['flight'])
+        GridFins.append(core['gridfins'])
+        Reused.append(core['reused'])
+        Legs.append(core['legs'])
+        LandingPad.append(core['landpad'])
+
+# ---------- Call Functions ----------
+getBoosterVersion(data)
+getLaunchSite(data)
+getPayloadData(data)
+getCoreData(data)
+
+# ---------- Build Final DataFrame ----------
+launch_dict = {
+    'FlightNumber': list(data['flight_number']),
+    'Date': list(data['date']),
+    'BoosterVersion': BoosterVersion,
+    'PayloadMass': PayloadMass,
+    'Orbit': Orbit,
+    'LaunchSite': LaunchSite,
+    'Outcome': Outcome,
+    'Flights': Flights,
+    'GridFins': GridFins,
+    'Reused': Reused,
+    'Legs': Legs,
+    'LandingPad': LandingPad,
+    'Block': Block,
+    'ReusedCount': ReusedCount,
+    'Serial': Serial,
+    'Longitude': Longitude,
+    'Latitude': Latitude
+}
+
+data_falcon9 = pd.DataFrame.from_dict(launch_dict)
+
+# ---------- Task 2: Filter to Falcon 9 ----------
+data_falcon9 = data_falcon9[data_falcon9['BoosterVersion'] == 'Falcon 9']
+data_falcon9.loc[:, 'FlightNumber'] = list(range(1, data_falcon9.shape[0]+1))
+
+# ---------- Task 3: Handle Missing PayloadMass ----------
+mean_payload_mass = data_falcon9['PayloadMass'].mean()
+data_falcon9['PayloadMass'].fillna(mean_payload_mass, inplace=True)
+
+# ---------- Results ----------
+print("Null values after cleaning:\n", data_falcon9.isnull().sum())
+print("\nFinal Falcon 9 dataset:\n", data_falcon9.head())
+
+!pip3 install beautifulsoup4
+!pip3 install requests
+
+import sys
+import re
+import unicodedata
+import requests
+import pandas as pd
+from bs4 import BeautifulSoup
+
+# ---------- Helpers (as given, with a tiny robustness tweak for mass) ----------
+def date_time(table_cells): 
+    """Return [date, time] strings from the first table cell."""
+    return [data_time.strip() for data_time in list(table_cells.strings)][0:2]
+
+def booster_version(table_cells):
+    """Return booster version text from the second table cell."""
+    out = ''.join([bv for i, bv in enumerate(table_cells.strings) if i % 2 == 0][0:-1])
+    return out
+
+def landing_status(table_cells):
+    """Return landing status (first string) from the cell."""
+    out = [i for i in table_cells.strings][0]
+    return out
+
+def get_mass(table_cells):
+    """Return payload mass as a string ending with 'kg' if present, else 0."""
+    mass = unicodedata.normalize("NFKD", table_cells.text).strip()
+    if mass:
+        pos = mass.find("kg")
+        if pos != -1:
+            new_mass = mass[0:pos+2].strip()
+        else:
+            new_mass = "0"
+    else:
+        new_mass = "0"
+    return new_mass
+
+def extract_column_from_header(row):
+    """Extract readable column name from a header <th> cell."""
+    # remove nested tags we don't want
+    if (row.br):
+        row.br.extract()
+    if row.a:
+        row.a.extract()
+    if row.sup:
+        row.sup.extract()
+    colunm_name = ' '.join(row.contents)
+    # Filter the digit and empty names
+    if not (colunm_name.strip().isdigit()):
+        colunm_name = colunm_name.strip()
+        return colunm_name
+
+# ---------- TASK 1: Request the Falcon 9 Launch Wiki page ----------
+static_url = "https://en.wikipedia.org/w/index.php?title=List_of_Falcon_9_and_Falcon_Heavy_launches&oldid=1027686922"
+resp = requests.get(static_url, headers={"User-Agent": "Mozilla/5.0"})
+resp.raise_for_status()  # fail fast if a network error occurs
+
+soup = BeautifulSoup(resp.text, "lxml")
+
+# ---------- TASK 2: Extract all column/variable names from the HTML table header ----------
+# Find ALL tables (as requested)
+html_tables = soup.find_all('table')
+
+# Also get the specific wikitable(s) we will parse
+launch_tables = soup.find_all('table', "wikitable plainrowheaders collapsible")
+
+# Use the first launch table to infer column headers
+first_table = launch_tables[0]
+header_cells = first_table.find('tr').find_all('th')
+column_names = []
+for th in header_cells:
+    name = extract_column_from_header(th)
+    if name:
+        column_names.append(name)
+
+# ---------- TASK 3: Create a data frame by parsing the launch HTML tables ----------
+launch_dict = dict.fromkeys(column_names)
+
+# Remove an irrelevant column if present
+if 'Date and time ( )' in launch_dict:
+    del launch_dict['Date and time ( )']
+
+# Initialize the dictionary with empty lists for desired columns
+launch_dict['Flight No.'] = []
+launch_dict['Launch site'] = []
+launch_dict['Payload'] = []
+launch_dict['Payload mass'] = []
+launch_dict['Orbit'] = []
+launch_dict['Customer'] = []
+launch_dict['Launch outcome'] = []
+# Added columns
+launch_dict['Version Booster'] = []
+launch_dict['Booster landing'] = []
+launch_dict['Date'] = []
+launch_dict['Time'] = []
+
+extracted_row = 0
+
+# Extract each table
+for table_number, table in enumerate(launch_tables):
+    # iterate rows
+    for rows in table.find_all("tr"):
+        # Check if the first table header is a number (the flight number)
+        flag = False
+        flight_number = None
+        if rows.th and rows.th.string:
+            flight_number = rows.th.string.strip()
+            flag = flight_number.isdigit()
+
+        # If not a valid data row, skip
+        if not flag:
+            continue
+
+        # Table data cells
+        row = rows.find_all('td')
+        if not row or len(row) < 9:
+            continue
+
+        extracted_row += 1
+
+        # ---- Parse each column ----
+        # Flight Number
+        launch_dict['Flight No.'].append(flight_number)
+
+        # Date & Time (first cell)
+        datatimelist = date_time(row[0])
+        date = datatimelist[0].strip(',')
+        time = datatimelist[1]
+        launch_dict['Date'].append(date)
+        launch_dict['Time'].append(time)
+
+        # Version Booster (second cell)
+        bv = booster_version(row[1])
+        if not bv and row[1].a and row[1].a.string:
+            bv = row[1].a.string
+        launch_dict['Version Booster'].append(bv if bv else "")
+
+        # Launch site (third cell)
+        launch_site = row[2].a.string if (row[2].a and row[2].a.string) else row[2].get_text(strip=True)
+        launch_dict['Launch site'].append(launch_site)
+
+        # Payload (fourth cell)
+        payload = row[3].a.string if (row[3].a and row[3].a.string) else row[3].get_text(strip=True)
+        launch_dict['Payload'].append(payload)
+
+        # Payload mass (fifth cell)
+        payload_mass = get_mass(row[4])
+        launch_dict['Payload mass'].append(payload_mass)
+
+        # Orbit (sixth cell)
+        orbit = row[5].a.string if (row[5].a and row[5].a.string) else row[5].get_text(strip=True)
+        launch_dict['Orbit'].append(orbit)
+
+        # Customer (seventh cell)
+        customer = row[6].a.string if (row[6].a and row[6].a.string) else row[6].get_text(strip=True)
+        launch_dict['Customer'].append(customer)
+
+        # Launch outcome (eighth cell)
+        launch_outcome = list(row[7].strings)[0].strip() if list(row[7].strings) else row[7].get_text(strip=True)
+        launch_dict['Launch outcome'].append(launch_outcome)
+
+        # Booster landing (ninth cell)
+        booster_landing = landing_status(row[8]).strip()
+        launch_dict['Booster landing'].append(booster_landing)
+
+# Build final DataFrame
+df = pd.DataFrame({k: pd.Series(v) for k, v in launch_dict.items()})
+
+# Optional: make payload mass numeric (float kg), if useful downstream
+def parse_mass_to_float_kg(s):
+    if not isinstance(s, str):
+        return pd.NA
+    m = re.search(r'([\d,]+\.?\d*)\s*kg', s)
+    if m:
+        return float(m.group(1).replace(',', ''))
+    return pd.NA
+
+if 'Payload mass' in df.columns:
+    df['Payload mass (kg)'] = df['Payload mass'].apply(parse_mass_to_float_kg)
+
+print(f"Extracted rows: {extracted_row}")
+print(df.head(10))
+print("\nNull counts:\n", df.isnull().sum())
+
+############# DATA WRANGLING 
+# Apply value_counts() on column LaunchSite
+# Install necessary packages
+!pip install pandas
+!pip install numpy
+
+# Import libraries
+import pandas as pd
+import numpy as np
+
+# Load the dataset
+df = pd.read_csv("https://cf-courses-data.s3.us.cloud-object-storage.appdomain.cloud/IBM-DS0321EN-SkillsNetwork/datasets/dataset_part_1.csv")
+
+# Display the first 10 rows
+print(df.head(10))
+
+# Check missing values
+print(df.isnull().sum() / len(df) * 100)
+
+# Check data types
+print(df.dtypes)
+
+# TASK 1: Calculate the number of launches on each site
+launch_counts = df['LaunchSite'].value_counts()
+print("Number of launches on each site:")
+print(launch_counts)
+
+# TASK 2: Calculate the number and occurrence of each orbit (excluding 'GTO')
+orbit_counts = df['Orbit'].value_counts()
+orbit_counts = orbit_counts.drop(labels='GTO', errors='ignore')  # Exclude GTO if present
+print("\nNumber and occurrence of each orbit (excluding GTO):")
+print(orbit_counts)
+
+# TASK 3: Calculate the number and occurrence of mission outcome of the orbits
+landing_outcomes = df['Outcome'].value_counts()
+print("\nNumber and occurrence of each mission outcome:")
+print(landing_outcomes)
+
+# TASK 4: Create a landing outcome label from Outcome column
+# Define bad outcomes
+bad_outcomes = set([
+    'None None', 'False Ocean', 'False Landing Pad', 'False ASDS', 
+    'False RTLS', 'False', 'Precluded (drone ship)', 'Precluded (drone ship)',
+    'No attempt', 'Failure (drone ship)', 'Failure', 'False (drone ship)'
+])
+
+# Create landing_class list: 0 for bad, 1 for good
+landing_class = df['Outcome'].apply(lambda x: 0 if x in bad_outcomes else 1)
+
+# Append as a new column
+df['Class'] = landing_class
+
+# Display updated DataFrame with Outcome and Class
+print("\nSample of Outcome and new Class column:")
+print(df[['Outcome', 'Class']].head(10))
+
+#### EDA WITH SQL ########
+!pip install ipython-sql
+!pip install sqlalchemy==1.3.9
+!pip install ipython-sql prettytable
+%load_ext sql
+import csv, sqlite3
+import prettytable
+prettytable.DEFAULT = 'DEFAULT'
+!pip install -q pandas
+
+con = sqlite3.connect("my_data1.db")
+cur = con.cursor()
+%sql sqlite:///my_data1.db
+import pandas as pd
+df = pd.read_csv("https://cf-courses-data.s3.us.cloud-object-storage.appdomain.cloud/IBM-DS0321EN-SkillsNetwork/labs/module_2/data/Spacex.csv")
+df.to_sql("SPACEXTBL", con, if_exists='replace', index=False,method="multi")
+
+#DROP THE TABLE IF EXISTS
+
+%sql DROP TABLE IF EXISTS SPACEXTABLE;
+%sql create table SPACEXTABLE as select * from SPACEXTBL where Date is not null
+
+
+%sql SELECT COUNT(*) FROM SPACEXTABLE;
+
+############### EDA DATA VISUALIZATIONS 
+!pip install matplotlib pandas numpy seaborn 
+
+# pandas is a software library written for the Python programming language for data manipulation and analysis.
+import pandas as pd
+#NumPy is a library for the Python programming language, adding support for large, multi-dimensional arrays and matrices, along with a large collection of high-level mathematical functions to operate on these arrays
+import numpy as np
+# Matplotlib is a plotting library for python and pyplot gives us a MatLab like plotting framework. We will use this in our plotter function to plot data.
+import matplotlib.pyplot as plt
+#Seaborn is a Python data visualization library based on matplotlib. It provides a high-level interface for drawing attractive and informative statistical graphics
+import seaborn as sns
+
+
+URL = "https://cf-courses-data.s3.us.cloud-object-storage.appdomain.cloud/IBM-DS0321EN-SkillsNetwork/datasets/dataset_part_2.csv"
+df=pd.read_csv(URL)
+df.head(5)
+df.describe()
+sns.catplot(y="PayloadMass", x="FlightNumber", hue="Class", data=df, aspect = 5)
+plt.xlabel("Flight Number",fontsize=20)
+plt.ylabel("Pay load Mass (kg)",fontsize=20)
+plt.show()
+
+# TASK 1: Visualize the relationship between Flight Number and Launch Site
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+import pandas as pd
+
+# Load dataset (part_2 as used earlier)
+URL = "https://cf-courses-data.s3.us.cloud-object-storage.appdomain.cloud/IBM-DS0321EN-SkillsNetwork/datasets/dataset_part_2.csv"
+df = pd.read_csv(URL)
+
+# Create scatter plot
+plt.figure(figsize=(12,6))
+sns.scatterplot(x="FlightNumber", y="LaunchSite", hue="Class", data=df, s=100)
+
+# Add titles and labels
+plt.title("Relationship between Flight Number and Launch Site", fontsize=16)
+plt.xlabel("Flight Number", fontsize=14)
+plt.ylabel("Launch Site", fontsize=14)
+plt.legend(title="Class (Landing Outcome)", labels=["Failed (0)", "Successful (1)"])
+plt.show()
+
+# TASK: Visualize the relationship between Payload Mass and Launch Site
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+import pandas as pd
+
+# Load dataset
+URL = "https://cf-courses-data.s3.us.cloud-object-storage.appdomain.cloud/IBM-DS0321EN-SkillsNetwork/datasets/dataset_part_2.csv"
+df = pd.read_csv(URL)
+
+# Scatter plot: Payload Mass vs Launch Site
+plt.figure(figsize=(12,6))
+sns.scatterplot(x="PayloadMass", y="LaunchSite", hue="Class", data=df, s=100)
+
+# Add titles and labels
+plt.title("Relationship between Payload Mass and Launch Site", fontsize=16)
+plt.xlabel("Payload Mass (kg)", fontsize=14)
+plt.ylabel("Launch Site", fontsize=14)
+plt.legend(title="Class (Landing Outcome)", labels=["Failed (0)", "Successful (1)"])
+plt.show()
+
+# TASK: Bar chart for the success rate of each orbit type
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+import pandas as pd
+
+# Load dataset
+URL = "https://cf-courses-data.s3.us.cloud-object-storage.appdomain.cloud/IBM-DS0321EN-SkillsNetwork/datasets/dataset_part_2.csv"
+df = pd.read_csv(URL)
+
+# Calculate success rate per orbit
+orbit_success = df.groupby("Orbit")["Class"].mean().reset_index()
+
+# Plot bar chart
+plt.figure(figsize=(12,6))
+sns.barplot(x="Orbit", y="Class", data=orbit_success, palette="viridis")
+
+# Formatting
+plt.title("Success Rate of Each Orbit Type", fontsize=16)
+plt.xlabel("Orbit Type", fontsize=14)
+plt.ylabel("Success Rate", fontsize=14)
+plt.xticks(rotation=45)
+plt.ylim(0,1)  # success rate is between 0 and 1
+plt.show()
+
+# TASK: Scatter plot of Payload Mass vs Orbit type
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+import pandas as pd
+
+# Load dataset
+URL = "https://cf-courses-data.s3.us.cloud-object-storage.appdomain.cloud/IBM-DS0321EN-SkillsNetwork/datasets/dataset_part_2.csv"
+df = pd.read_csv(URL)
+
+# Scatter plot
+plt.figure(figsize=(12,6))
+sns.scatterplot(x="PayloadMass", y="Orbit", hue="Class", data=df, s=100)
+
+# Formatting
+plt.title("Payload Mass vs Orbit Type", fontsize=16)
+plt.xlabel("Payload Mass (kg)", fontsize=14)
+plt.ylabel("Orbit Type", fontsize=14)
+plt.legend(title="Class (Landing Outcome)", labels=["Failed (0)", "Successful (1)"])
+plt.show()
+
+# TASK: Scatter plot of Flight Number vs Orbit type
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+import pandas as pd
+
+# Load dataset
+URL = "https://cf-courses-data.s3.us.cloud-object-storage.appdomain.cloud/IBM-DS0321EN-SkillsNetwork/datasets/dataset_part_2.csv"
+df = pd.read_csv(URL)
+
+# Scatter plot
+plt.figure(figsize=(12,6))
+sns.scatterplot(x="FlightNumber", y="Orbit", hue="Class", data=df, s=100)
+
+# Formatting
+plt.title("Flight Number vs Orbit Type", fontsize=16)
+plt.xlabel("Flight Number", fontsize=14)
+plt.ylabel("Orbit Type", fontsize=14)
+plt.legend(title="Class (Landing Outcome)", labels=["Failed (0)", "Successful (1)"])
+plt.show()
+
+# TASK: Scatter plot of Payload Mass vs Orbit type
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+import pandas as pd
+
+# Load dataset
+URL = "https://cf-courses-data.s3.us.cloud-object-storage.appdomain.cloud/IBM-DS0321EN-SkillsNetwork/datasets/dataset_part_2.csv"
+df = pd.read_csv(URL)
+
+# Scatter plot
+plt.figure(figsize=(12,6))
+sns.scatterplot(x="PayloadMass", y="Orbit", hue="Class", data=df, s=100)
+
+# Formatting
+plt.title("Payload Mass vs Orbit Type", fontsize=16)
+plt.xlabel("Payload Mass (kg)", fontsize=14)
+plt.ylabel("Orbit Type", fontsize=14)
+plt.legend(title="Class (Landing Outcome)", labels=["Failed (0)", "Successful (1)"])
+plt.show()
+
+
+# TASK: Line chart of yearly average success rate
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+import pandas as pd
+
+# Load dataset
+URL = "https://cf-courses-data.s3.us.cloud-object-storage.appdomain.cloud/IBM-DS0321EN-SkillsNetwork/datasets/dataset_part_2.csv"
+df = pd.read_csv(URL)
+
+# Convert date to datetime
+df['Date'] = pd.to_datetime(df['Date'])
+
+# Extract year
+df['Year'] = df['Date'].dt.year
+
+# Calculate yearly average success rate
+yearly_success = df.groupby("Year")['Class'].mean().reset_index()
+
+# Line chart
+plt.figure(figsize=(12,6))
+sns.lineplot(x="Year", y="Class", data=yearly_success, marker="o")
+
+# Formatting
+plt.title("Yearly Average Success Rate of SpaceX Landings", fontsize=16)
+plt.xlabel("Year", fontsize=14)
+plt.ylabel("Average Success Rate", fontsize=14)
+plt.ylim(0,1)  # success rate between 0 and 1
+plt.grid(True)
+plt.show()
+
+import pandas as pd
+
+# Load dataset
+URL = "https://cf-courses-data.s3.us.cloud-object-storage.appdomain.cloud/IBM-DS0321EN-SkillsNetwork/datasets/dataset_part_1.csv"
+df = pd.read_csv(URL)
+
+# Find unique launch sites
+unique_sites = df['LaunchSite'].unique()
+
+print("Unique Launch Sites:")
+for site in unique_sites:
+    print(site)
+import pandas as pd
+
+# Load dataset
+URL = "https://cf-courses-data.s3.us.cloud-object-storage.appdomain.cloud/IBM-DS0321EN-SkillsNetwork/datasets/dataset_part_1.csv"
+df = pd.read_csv(URL)
+
+# Filter launch sites starting with 'CCA'
+cca_sites = df[df['LaunchSite'].str.startswith('CCA')]
+
+# Show first 5 records
+print(cca_sites.head(5))
+import pandas as pd
+import re
+
+# Load dataset
+URL = "https://cf-courses-data.s3.us.cloud-object-storage.appdomain.cloud/IBM-DS0321EN-SkillsNetwork/datasets/dataset_part_1.csv"
+df = pd.read_csv(URL)
+
+# Parse date
+df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+
+# Successful ground-pad landings typically appear as 'True RTLS' or 'True Landing Pad' (or 'Success ...')
+mask_ground = df['Outcome'].str.contains(r'(RTLS|Landing Pad)', flags=re.I, na=False)
+mask_success = df['Outcome'].str.contains(r'(True|Success)', flags=re.I, na=False)
+
+ground_success = df.loc[mask_ground & mask_success].sort_values('Date')
+
+# Earliest date(s)
+first_date = ground_success['Date'].min()
+first_records = ground_success[ground_success['Date'] == first_date][
+    ['FlightNumber','Date','LaunchSite','BoosterVersion','Outcome']
+]
+
+print("First successful ground-pad landing date(s):", sorted(first_records['Date'].dt.date.unique()))
+print("\nMatching record(s):")
+print(first_records.to_string(index=False))
+import pandas as pd
+import re
+
+# Load dataset
+URL = "https://cf-courses-data.s3.us.cloud-object-storage.appdomain.cloud/IBM-DS0321EN-SkillsNetwork/datasets/dataset_part_1.csv"
+df = pd.read_csv(URL)
+
+# Ensure numeric payload mass
+df['PayloadMass'] = pd.to_numeric(df['PayloadMass'], errors='coerce')
+
+# --- Filters ---
+# Success on drone ship can appear as 'Success (drone ship)' or 'True ASDS' etc.
+mask_success = df['Outcome'].str.contains(r'(Success|True)', flags=re.I, na=False)
+mask_drone   = df['Outcome'].str.contains(r'(drone ship|ASDS)', flags=re.I, na=False)
+mask_payload = (df['PayloadMass'] > 4000) & (df['PayloadMass'] < 6000)
+
+filtered = df.loc[mask_success & mask_drone & mask_payload]
+
+# Unique booster "names" — use Serial (specific booster) and show version for context
+result = (
+    filtered[['Serial', 'BoosterVersion', 'PayloadMass', 'Outcome']]
+    .dropna(subset=['Serial'])
+    .drop_duplicates(subset=['Serial'])
+    .sort_values('Serial')
+)
+
+print("Boosters that successfully landed on a drone ship with payload mass (4000, 6000) kg:")
+print(result.to_string(index=False))
+
+# If the assignment strictly wants only the list of booster names:
+print("\nUnique booster serials:")
+print(sorted(result['Serial'].unique()))
+import pandas as pd
+import re
+
+# Load dataset
+URL = "https://cf-courses-data.s3.us.cloud-object-storage.appdomain.cloud/IBM-DS0321EN-SkillsNetwork/datasets/dataset_part_1.csv"
+df = pd.read_csv(URL)
+
+# Ensure Outcome is a clean string
+df['Outcome'] = df['Outcome'].astype(str).str.strip()
+
+# Classify outcomes: success if contains 'True' or 'Success', else failure
+success_mask = df['Outcome'].str.contains(r'\b(True|Success)\b', flags=re.I, na=False)
+
+# Tally totals
+totals = pd.Series({
+    "Success": int(success_mask.sum()),
+    "Failure": int((~success_mask).sum())
+})
+
+print(totals)
+print(f"\nTotal missions counted: {len(df)}")
+import pandas as pd
+import re
+
+# --- 1) Get a dataframe ---
+try:
+    # If you already have a df in memory (e.g., from your Wikipedia scrape), keep it
+    assert isinstance(df, pd.DataFrame)
+except:
+    # Otherwise load the IBM dataset
+    URL = "https://cf-courses-data.s3.us.cloud-object-storage.appdomain.cloud/IBM-DS0321EN-SkillsNetwork/datasets/dataset_part_1.csv"
+    df = pd.read_csv(URL)
+
+# --- 2) Find the payload mass column robustly ---
+mass_candidates = ['PayloadMass', 'Payload mass (kg)', 'Payload mass']
+mass_col = next((c for c in mass_candidates if c in df.columns), None)
+if mass_col is None:
+    raise KeyError(f"No payload mass column found. Looked for: {mass_candidates}")
+
+# --- 3) Clean/parse payload mass to floats in kilograms ---
+def parse_mass_to_kg(x):
+    if pd.isna(x):
+        return pd.NA
+    if isinstance(x, (int, float)):
+        return float(x)
+    s = str(x)
+    # grab the numeric part, allow commas and decimals
+    m = re.search(r'([\d,]+(?:\.\d+)?)', s)
+    if not m:
+        return pd.NA
+    return float(m.group(1).replace(',', ''))
+
+df[mass_col] = df[mass_col].apply(parse_mass_to_kg)
+
+# --- 4) Choose a "booster name" column ---
+# Prefer Serial (specific booster). If missing (e.g., Wikipedia table), fall back to version columns.
+booster_name_col = None
+for c in ['Serial', 'BoosterVersion', 'Version Booster']:
+    if c in df.columns:
+        booster_name_col = c
+        break
+if booster_name_col is None:
+    raise KeyError("No booster identifier column found (looked for 'Serial', 'BoosterVersion', 'Version Booster').")
+
+# --- 5) Compute max payload and list boosters that carried it ---
+clean = df.dropna(subset=[mass_col])
+max_mass = clean[mass_col].max()
+
+max_rows = clean[clean[mass_col] == max_mass].copy()
+
+# Keep useful context if available
+cols_to_show = [c for c in [booster_name_col, mass_col, 'Date', 'Orbit', 'LaunchSite'] if c in max_rows.columns]
+result = (max_rows[cols_to_show]
+          .drop_duplicates()
+          .sort_values(by=[booster_name_col] + ([ 'Date'] if 'Date' in cols_to_show else [])))
+
+print(f"Maximum payload mass found: {max_mass:.0f} kg")
+print("\nBoosters that carried the maximum payload mass:")
+print(result.to_string(index=False))
+
+import pandas as pd
+import re
+
+# Load dataset
+URL = "https://cf-courses-data.s3.us.cloud-object-storage.appdomain.cloud/IBM-DS0321EN-SkillsNetwork/datasets/dataset_part_1.csv"
+df = pd.read_csv(URL)
+
+# Parse date and filter to year 2015
+df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+df_2015 = df[df['Date'].dt.year == 2015].copy()
+
+# Drone-ship attempts and failed outcomes (e.g., 'Failure (drone ship)', 'False ASDS')
+mask_drone = df_2015['Outcome'].str.contains(r'(drone ship|ASDS)', flags=re.I, na=False)
+mask_fail  = df_2015['Outcome'].str.contains(r'(False|Failure)', flags=re.I, na=False)
+
+# Select and display
+result = (df_2015.loc[mask_drone & mask_fail, ['Date','Outcome','BoosterVersion','LaunchSite']]
+          .sort_values('Date')
+          .reset_index(drop=True))
+
+print(result)
+print(f"\nTotal failed drone-ship landings in 2015: {len(result)}")
+
+import pandas as pd
+
+# Load dataset
+URL = "https://cf-courses-data.s3.us.cloud-object-storage.appdomain.cloud/IBM-DS0321EN-SkillsNetwork/datasets/dataset_part_1.csv"
+df = pd.read_csv(URL)
+
+# Parse dates
+df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+
+# Filter to the requested date range (inclusive)
+mask = (df['Date'] >= pd.Timestamp('2010-06-04')) & (df['Date'] <= pd.Timestamp('2017-03-20'))
+df_range = df.loc[mask].copy()
+
+# Clean Outcome text
+df_range['Outcome'] = df_range['Outcome'].astype(str).str.strip()
+
+# Count and rank outcomes
+outcome_counts = (
+    df_range.groupby('Outcome', dropna=False)
+            .size()
+            .sort_values(ascending=False)
+            .reset_index(name='Count')
+)
+
+print(outcome_counts)
+
+
+# Folium map: show + save + auto-fit to markers
+
+import pandas as pd
+from IPython.display import display, IFrame
+import folium
+from folium.plugins import MarkerCluster, Fullscreen
+
+# Load dataset (any data with LaunchSite is fine)
+URL = "https://cf-courses-data.s3.us.cloud-object-storage.appdomain.cloud/IBM-DS0321EN-SkillsNetwork/datasets/dataset_part_1.csv"
+df = pd.read_csv(URL)
+
+# Known coordinates for SpaceX launch sites
+site_coords = {
+    "CCAFS LC-40": (28.561857, -80.577366),   # Cape Canaveral
+    "KSC LC-39A":  (28.608389, -80.604333),   # Kennedy Space Center
+    "VAFB SLC-4E": (34.632093, -120.610829),  # Vandenberg
+}
+
+# Sites present in your data
+sites_present = sorted(set(df["LaunchSite"]).intersection(site_coords.keys()))
+
+# Build map
+m = folium.Map(location=[20, 0], zoom_start=2, tiles="OpenStreetMap")
+
+# Title banner
+title_html = """
+<div style="position: fixed; top: 10px; left: 50%; transform: translateX(-50%);
+            z-index: 9999; background: rgba(255,255,255,0.9); padding: 8px 14px;
+            border-radius: 8px; font-weight: 700; box-shadow: 0 2px 6px rgba(0,0,0,0.2);">
+  SpaceX Falcon 9 Launch Sites — Global Overview
+</div>
+"""
+m.get_root().html.add_child(folium.Element(title_html))
+
+Fullscreen().add_to(m)
+cluster = MarkerCluster(name="Launch Sites").add_to(m)
+
+lats, lons = [], []
+for site in sites_present:
+    lat, lon = site_coords[site]
+    lats.append(lat); lons.append(lon)
+    folium.Marker(
+        [lat, lon],
+        tooltip=site,
+        popup=folium.Popup(f"<b>{site}</b><br>Lat: {lat:.6f}, Lon: {lon:.6f}", max_width=250),
+        icon=folium.Icon(color="blue", icon="rocket", prefix="fa")
+    ).add_to(cluster)
+
+# Fit map to all markers
+if lats and lons:
+    m.fit_bounds([[min(lats), min(lons)], [max(lats), max(lons)]], padding=(30, 30))
+
+# (A) Display in notebook
+display(m)          # <-- ensures it renders even if not last line
+
+# (B) Save HTML and also show an iframe preview (handy for screenshots)
+html_path = "spacex_launch_sites_map.html"
+m.save(html_path)
+display(IFrame(src=html_path, width="100%", height="600"))
+print(f"Saved HTML to: {html_path}")
+
+
+
+# Visualize model accuracies and find the best model
+
+import pandas as pd
+import matplotlib.pyplot as plt
+
+from sklearn.model_selection import train_test_split
+from sklearn.pipeline import Pipeline
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.impute import SimpleImputer
+
+from sklearn.linear_model import LogisticRegression
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.svm import SVC
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.metrics import accuracy_score
+
+# 1) Load data
+URL = "https://cf-courses-data.s3.us.cloud-object-storage.appdomain.cloud/IBM-DS0321EN-SkillsNetwork/datasets/dataset_part_2.csv"
+df = pd.read_csv(URL)
+
+# 2) Define features/target
+target = "Class"
+features = ["FlightNumber", "PayloadMass", "Orbit", "LaunchSite"]  # minimal, robust set from part_2
+
+X = df[features].copy()
+y = df[target].astype(int)
+
+# 3) Preprocessing: numeric + categorical
+numeric_features = ["FlightNumber", "PayloadMass"]
+categorical_features = ["Orbit", "LaunchSite"]
+
+numeric_transformer = Pipeline(steps=[
+    ("imputer", SimpleImputer(strategy="median")),
+    ("scaler", StandardScaler())
+])
+
+categorical_transformer = Pipeline(steps=[
+    ("imputer", SimpleImputer(strategy="most_frequent")),
+    ("onehot", OneHotEncoder(handle_unknown="ignore"))
+])
+
+preprocessor = ColumnTransformer(
+    transformers=[
+        ("num", numeric_transformer, numeric_features),
+        ("cat", categorical_transformer, categorical_features),
+    ],
+    remainder="drop"
+)
+
+# 4) Train/test split
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.25, random_state=42, stratify=y
+)
+
+# 5) Models to compare
+models = {
+    "Logistic Regression": LogisticRegression(max_iter=1000, n_jobs=None),
+    "Decision Tree":       DecisionTreeClassifier(random_state=42),
+    "SVM (RBF)":           SVC(kernel="rbf"),
+    "KNN":                 KNeighborsClassifier()
+}
+
+# 6) Train, evaluate, collect accuracies
+accuracies = {}
+for name, clf in models.items():
+    pipe = Pipeline(steps=[("preprocessor", preprocessor), ("clf", clf)])
+    pipe.fit(X_train, y_train)
+    y_pred = pipe.predict(X_test)
+    acc = accuracy_score(y_test, y_pred)
+    accuracies[name] = acc
+
+# 7) Bar chart of accuracies (matplotlib only)
+plt.figure(figsize=(9,5))
+model_names = list(accuracies.keys())
+model_scores = [accuracies[m] for m in model_names]
+plt.bar(model_names, model_scores)
+plt.ylim(0, 1)
+plt.ylabel("Accuracy")
+plt.title("Classification Accuracy by Model (Test Set)")
+for i, v in enumerate(model_scores):
+    plt.text(i, v + 0.01, f"{v:.2f}", ha="center", va="bottom")
+plt.xticks(rotation=15)
+plt.tight_layout()
+plt.show()
+
+# 8) Report the best model
+best_model = max(accuracies, key=accuracies.get)
+print("Accuracies:", {k: f"{v:.3f}" for k,v in accuracies.items()})
+print(f"Highest accuracy: {best_model} ({accuracies[best_model]:.3f})")
+
+
+# --- Confusion matrix plot that works even if ConfusionMatrixDisplay isn't available ---
+
+import matplotlib.pyplot as plt
+import numpy as np
+from sklearn.metrics import confusion_matrix, classification_report
+
+# Try to import ConfusionMatrixDisplay (newer sklearn)
+try:
+    from sklearn.metrics import ConfusionMatrixDisplay
+except Exception:
+    ConfusionMatrixDisplay = None
+
+def plot_confusion(y_true, y_pred, labels=(0,1), title="Confusion Matrix"):
+    cm = confusion_matrix(y_true, y_pred, labels=labels)
+
+    if ConfusionMatrixDisplay is not None:
+        disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=labels)
+        disp.plot(values_format="d")
+        plt.title(title)
+        plt.tight_layout()
+        plt.show()
+    else:
+        # Manual Matplotlib plot
+        fig, ax = plt.subplots(figsize=(4.5, 4))
+        im = ax.imshow(cm, interpolation='nearest', cmap='Blues')
+        ax.figure.colorbar(im, ax=ax)
+        ax.set(xticks=np.arange(len(labels)),
+               yticks=np.arange(len(labels)),
+               xticklabels=labels, yticklabels=labels,
+               ylabel='True label', xlabel='Predicted label',
+               title=title)
+        # Annotate cells
+        thresh = cm.max() / 2.0 if cm.max() > 0 else 0.5
+        for i in range(cm.shape[0]):
+            for j in range(cm.shape[1]):
+                ax.text(j, i, format(cm[i, j], 'd'),
+                        ha="center", va="center",
+                        color="white" if cm[i, j] > thresh else "black")
+        plt.tight_layout()
+        plt.show()
+    return cm
+
+# ===== Example usage with your best model pipeline =====
+# Assume you already trained and picked best_pipe as your best model:
+# y_pred = best_pipe.predict(X_test)
+
+# Plot and print report
+cm = plot_confusion(y_test, y_pred, labels=[0,1], title="Confusion Matrix — Best Model")
+print("\nClassification report:\n", classification_report(y_test, y_pred, digits=3))
+
