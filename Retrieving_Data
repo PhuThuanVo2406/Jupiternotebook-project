@@ -1,0 +1,32 @@
+# Reading CVS file 
+import pandas as pd 
+file_path = 'data/data.irs.cvs' 
+data = pd.read_csv(file_path)
+data.head() 
+data.describe() 
+print(data.iloc[:5]) 
+
+## Retrieving SQL Data
+!install sql as sql 
+import sql as sq
+path = 'sql_database.db' 
+con = sq.Connection(path)
+query = ''' 
+SELECT * FROM rock_songs; 
+'''
+# execute query 
+data = pd.read_sq(con, query ) 
+
+
+
+######## READING NON SQL DATA 
+from pymongo import MongoClient
+# create a mongo connection
+con = MongoClient() 
+# choose database 
+db = con.database_name 
+# create a cursor object using query 
+cursor = db.collection_name.find(query)
+# Expand cursor and construct dataframe 
+df = pd.DataFrame(list(cursor))
+
