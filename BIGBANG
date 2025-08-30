@@ -1,0 +1,63 @@
+# 0) From your project folder:
+python3 -m venv .venv
+# activate venv
+source .venv/bin/activate
+
+# 1) Base tooling
+python -m pip install --upgrade pip setuptools wheel
+
+# 2) System dependency for LightGBM (OpenMP)
+# (Requires Homebrew. If you don't have brew, install from https://brew.sh first.)
+brew install libomp || true
+# Ensure runtime can find libomp
+export DYLD_LIBRARY_PATH="$(brew --prefix libomp)/lib:${DYLD_LIBRARY_PATH}"
+# Create a symlink to common lookup locations (handles Intel/Apple Silicon paths)
+sudo mkdir -p /usr/local/lib || true
+sudo ln -sf "$(brew --prefix libomp)/lib/libomp.dylib" /usr/local/lib/libomp.dylib
+[ -d /opt/homebrew/lib ] && sudo ln -sf "$(brew --prefix libomp)/lib/libomp.dylib" /opt/homebrew/lib/libomp.dylib || true
+
+# 3) Core data stack
+pip install numpy pandas pyarrow duckdb
+
+# 4) Geo stack (for maps; optional but included)
+pip install "shapely>=2.0" "pyproj>=3.6" "rtree>=1.0" "pyogrio>=0.9" "geopandas>=0.14"
+
+# 5) ML + Stats
+pip install scikit-learn statsmodels
+pip install --force-reinstall lightgbm   # ensure it links against libomp just installed
+
+# 6) Viz + notebooks
+pip install matplotlib seaborn jupyterlab
+
+# 7) Time utils
+pip install python-dateutil holidays pytz
+
+# 8) MySQL connectors
+pip install mysql-connector-python SQLAlchemy
+
+# 9) Deep Learning (both, since you asked for everything)
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+pip install tensorflow-cpu
+
+# 10) VERIFY: import everything and report status
+python - <<'PY'
+import importlib, sys
+
+packages = [
+    "numpy", "pandas", "pyarrow", "duckdb",
+    "geopandas", "shapely", "pyproj", "rtree", "pyogrio",
+    "sklearn", "lightgbm", "statsmodels",
+    "matplotlib", "seaborn", "jupyterlab",
+    "dateutil", "holidays", "pytz",
+    "mysql.connector", "sqlalchemy",
+    "torch", "tensorflow",
+]
+
+print(f"Python {sys.version.split()[0]}")
+for pkg in packages:
+    try:
+        importlib.import_module(pkg)
+        print(f"[OK] {pkg} is installed")
+    except Exception as e:
+        print(f"[MISSING] {pkg} → {e.__class__.__name__}: {e}")
+PY
