@@ -1,0 +1,442 @@
+# ===================== EDA: Trips vs Weather & Economic Indicators =====================
+# Uses SIX objects already in your Python session:
+#   path_trips, path_weather, path_features, path_basefeat, path_feature_withFLAG, path_feature_withLAG
+# Each can be either:
+#   - a pandas DataFrame, or
+#   - a string path to a CSV (e.g., "/Users/.../Trips_daily.csv")
+#
+# What this does
+# --------------
+# 1) Loads/normalizes all inputs, parses date col 'd'
+# 2) Auto-detects demand column (or you can set DEMAND_COL to a name)
+# 3) Summaries: shape/dtypes/missingness/describe
+# 4) Plots: demand timeline, rolling means, seasonality (DOW/month), ACF (quick)
+# 5) Correlations: demand vs weather; demand vs features/economic indicators
+# 6) Weekly & monthly aggregations
+# 7) Exports CSV summaries + PNG figures to ./output_eda
+#
+# =======================================================================================
+
+import os, re, textwrap
+from datetime import datetime
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# ----------------------------- CONFIG ---------------------------------
+# If you know the exact demand column name, set it here to override auto-detect:
+DEMAND_COL = None   # e.g., "trips_total" or "y"; leave None to auto-detect
+
+# Output folder (created if missing)
+OUT_DIR = "./output_eda"
+os.makedirs(OUT_DIR, exist_ok=True)
+
+# A colorful palette for plots
+PALETTE = ["#1f77b4","#ff7f0e","#2ca02c","#d62728","#9467bd",
+           "#8c564b","#e377c2","#7f7f7f","#bcbd22","#17becf"]
+
+# ----------------------------- HELPERS --------------------------------
+def _to_df(obj):
+    """Accept DataFrame or CSV path string and return a normalized DataFrame with lower_snake_case cols and parsed 'd'."""
+    if isinstance(obj, pd.DataFrame):
+        df = obj.copy()
+    elif isinstance(obj, str):
+        df = pd.read_csv(obj)
+    else:
+        raise TypeError("Expected DataFrame or file path string.")
+    # standardize columns
+    df.columns = [re.sub(r"\s+", "_", c.strip().lower()) for c in df.columns]
+    # parse date
+    if "d" in df.columns:
+        df["d"] = pd.to_datetime(df["d"], errors="coerce")
+    return df
+
+def pct_missing(df):
+    return (df.isna().mean()*100).round(2).sort_values(ascending=False)
+
+def memory_mb(df):
+    return round(df.memory_usage(deep=True).sum() / (1024**2), 2)
+
+def find_demand_column(df: pd.DataFrame):
+    # priority list + regex fallback
+    priority = ["trips_total","trips","y","demand","rides","orders","count","cnt","volume","target"]
+    for c in priority:
+        if c in df.columns and pd.api.types.is_numeric_dtype(df[c]):
+            return c
+    # fallback: numeric with largest variance
+    numeric = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c]) and c not in ["id"]]
+    if numeric:
+        return df[numeric].var().sort_values(ascending=False).index[0]
+    return None
+
+def safe_corr(a, b):
+    s = pd.concat([a, b], axis=1).dropna()
+    if s.shape[0] < 3:
+        return np.nan
+    return s.corr().iloc[0,1]
+
+def lag_autocorr_series(s: pd.Series, max_lag=60):
+    out = []
+    for lag in range(1, max_lag+1):
+        r = safe_corr(s, s.shift(lag))
+        out.append((lag, r))
+    return pd.DataFrame(out, columns=["lag","autocorr"]).set_index("lag")
+
+def save_table(df: pd.DataFrame, name: str):
+    path = os.path.join(OUT_DIR, f"{name}.csv")
+    df.to_csv(path, index=False)
+    return path
+
+def plot_save(show_fn, filename: str):
+    plt.tight_layout()
+    plt.savefig(os.path.join(OUT_DIR, filename), dpi=150)
+    plt.show()
+
+# ------------------------- 1) LOAD / NORMALIZE ------------------------
+trips      = _to_df(path_trips)
+weather    = _to_df(path_weather) if path_weather is not None else None
+features   = _to_df(path_features) if path_features is not None else None
+basefeat   = _to_df(path_basefeat) if path_basefeat is not None else None
+feat_flag  = _to_df(path_feature_withFLAG) if path_feature_withFLAG is not None else None
+feat_lag   = _to_df(path_feature_withLAG) if path_feature_withLAG is not None else None
+
+tables = {
+    "Trips_daily": trips,
+    "Weather": weather,
+    "FEATURES": features,
+    "BASE_FEATURES": basefeat,
+    "FEATURES_withflags": feat_flag,
+    "FEATURES_withLags": feat_lag,
+}
+
+summary_rows = []
+for name, df in tables.items():
+    if df is None: 
+        continue
+    summary_rows.append({
+        "table": name,
+        "rows": len(df),
+        "cols": df.shape[1],
+        "has_d": "d" in df.columns,
+        "memory_mb": memory_mb(df),
+    })
+summary_df = pd.DataFrame(summary_rows)
+save_table(summary_df, "00_table_overview")
+
+# -------------------- 2) DEMAND COLUMN & ENRICH CALENDAR --------------
+if DEMAND_COL is None:
+    DEMAND_COL = find_demand_column(trips)
+if DEMAND_COL is None:
+    raise RuntimeError("Could not infer demand column from trips table. Please set DEMAND_COL explicitly.")
+
+trips = trips.sort_values("d").reset_index(drop=True)
+trips["year"]  = trips["d"].dt.year
+trips["month"] = trips["d"].dt.month
+trips["dow"]   = trips["d"].dt.dayofweek
+trips["week"]  = trips["d"].dt.isocalendar().week.astype("Int64")
+
+# -------------------- 3) SUMMARIES & MISSINGNESS ----------------------
+desc = trips.describe(include="all").transpose().reset_index().rename(columns={"index":"column"})
+save_table(desc, "01_trips_describe")
+
+miss = pct_missing(trips).reset_index()
+miss.columns = ["column", "missing_%"]
+save_table(miss, "02_trips_missingness")
+
+# -------------------- 4) PLOTS: DEMAND, MA, SEASONALITY ---------------
+# 4.1 Demand over time
+plt.figure(figsize=(12,4))
+plt.plot(trips["d"], trips[DEMAND_COL], linewidth=1.6)
+plt.title(f"Demand over Time — {DEMAND_COL}")
+plt.xlabel("Date"); plt.ylabel("Demand")
+plt.grid(True, alpha=0.3)
+plot_save(plt, "10_demand_over_time.png")
+
+# 4.2 Rolling means (7/28/84)
+plt.figure(figsize=(12,4))
+for w in [7, 28, 84]:
+    if len(trips) >= w:
+        plt.plot(trips["d"], trips[DEMAND_COL].rolling(w).mean(), linewidth=1.5, label=f"{w}-day MA")
+plt.title("Rolling Means of Demand")
+plt.xlabel("Date"); plt.ylabel("Demand (MA)")
+plt.legend(); plt.grid(True, alpha=0.3)
+plot_save(plt, "11_demand_rolling_means.png")
+
+# 4.3 Seasonality by DOW, Month
+dow_avg = trips.groupby("dow", dropna=True)[DEMAND_COL].mean().reset_index()
+plt.figure(figsize=(7,4))
+plt.bar(dow_avg["dow"], dow_avg[DEMAND_COL])
+plt.title("Average Demand by Day of Week (0=Mon)"); plt.xlabel("Day of Week"); plt.ylabel("Avg Demand")
+plot_save(plt, "12_avg_by_dow.png")
+
+month_avg = trips.groupby("month", dropna=True)[DEMAND_COL].mean().reset_index()
+plt.figure(figsize=(7,4))
+plt.bar(month_avg["month"], month_avg[DEMAND_COL])
+plt.title("Average Demand by Month"); plt.xlabel("Month"); plt.ylabel("Avg Demand")
+plot_save(plt, "13_avg_by_month.png")
+
+# -------------------- 5) OUTLIERS (z-score) ---------------------------
+if trips[DEMAND_COL].std() and trips[DEMAND_COL].std() > 0:
+    z = (trips[DEMAND_COL] - trips[DEMAND_COL].mean()) / trips[DEMAND_COL].std()
+    outliers = trips.loc[z.abs() >= 3, ["d", DEMAND_COL]].copy()
+    outliers["z"] = z.loc[outliers.index]
+    save_table(outliers.reset_index(drop=True), "14_demand_outliers_z3")
+
+# -------------------- 6) WEATHER RELATIONSHIPS ------------------------
+if weather is not None and "d" in weather.columns:
+    merged_w = pd.merge(trips[["d", DEMAND_COL]], weather, on="d", how="left", suffixes=("", "_w"))
+    w_numeric = [c for c in merged_w.columns if c not in ["d", DEMAND_COL] and pd.api.types.is_numeric_dtype(merged_w[c])]
+    corr_rows = [(c, safe_corr(merged_w[DEMAND_COL], merged_w[c])) for c in w_numeric]
+    corr_weather = pd.DataFrame(corr_rows, columns=["weather_var","pearson_r"]).sort_values("pearson_r", key=lambda x: x.abs(), ascending=False)
+    save_table(corr_weather, "20_corr_demand_weather")
+
+    # scatter top 6 abs corr
+    for i, c in enumerate(corr_weather["weather_var"].head(6)):
+        ss = merged_w[[c, DEMAND_COL]].dropna()
+        if ss.shape[0] >= 10:
+            plt.figure(figsize=(6,4))
+            plt.scatter(ss[c], ss[DEMAND_COL], alpha=0.4)
+            r = safe_corr(ss[DEMAND_COL], ss[c])
+            plt.title(f"Demand vs {c} (r={r:.2f})")
+            plt.xlabel(c); plt.ylabel("Demand")
+            plot_save(plt, f"21_scatter_demand_vs_{c}.png")
+
+# -------------------- 7) ECON / FEATURES RELATIONSHIPS ----------------
+def corr_block(df_feat: pd.DataFrame, label: str):
+    if df_feat is None or "d" not in df_feat.columns:
+        return
+    joined = pd.merge(trips[["d", DEMAND_COL]], df_feat, on="d", how="left", suffixes=("", f"_{label.lower()}"))
+    # Ensure demand column hasn't been suffixed away
+    if DEMAND_COL not in joined.columns:
+        # recover if collision created suffix
+        cand = [c for c in joined.columns if c.startswith(DEMAND_COL)]
+        if cand:
+            joined.rename(columns={cand[0]: DEMAND_COL}, inplace=True)
+
+    num_cols = [c for c in joined.columns if c not in ["d", DEMAND_COL] and pd.api.types.is_numeric_dtype(joined[c])]
+    # prioritize likely economic indicators
+    econ_like = [c for c in num_cols if re.search(r"(cpi|fedfunds|payems|unrate)", c)]
+    use_cols = econ_like if len(econ_like) >= 3 else num_cols
+    if not use_cols:
+        return
+
+    corr_df = pd.DataFrame([(c, safe_corr(joined[DEMAND_COL], joined[c])) for c in use_cols],
+                           columns=["feature","pearson_r"]).sort_values("pearson_r", key=lambda s: s.abs(), ascending=False)
+    save_table(corr_df, f"30_corr_{label}")
+
+    # scatter top 3
+    for i, c in enumerate(corr_df["feature"].head(3)):
+        ss = joined[[c, DEMAND_COL]].dropna()
+        if ss.shape[0] >= 10:
+            plt.figure(figsize=(6,4))
+            plt.scatter(ss[c], ss[DEMAND_COL], alpha=0.35)
+            r = safe_corr(ss[DEMAND_COL], ss[c])
+            plt.title(f"{label}: Demand vs {c} (r={r:.2f})")
+            plt.xlabel(c); plt.ylabel("Demand")
+            plot_save(plt, f"31_scatter_{label}_{i+1}_{c}.png")
+
+for label, df in [("FEATURES", features), ("BASE_FEATURES", basefeat),
+                  ("FEATURES_withflags", feat_flag), ("FEATURES_withLags", feat_lag)]:
+    corr_block(df, label)
+
+# -------------------- 8) LAG AUTOCORRELATION (quick ACF) --------------
+ac_df = lag_autocorr_series(trips[DEMAND_COL], max_lag=60).reset_index()
+save_table(ac_df, "40_demand_lag_autocorr")
+
+plt.figure(figsize=(10,4))
+plt.stem(ac_df["lag"], ac_df["autocorr"], basefmt=" ")
+plt.title("Autocorrelation of Demand (lags 1..60)")
+plt.xlabel("Lag (days)"); plt.ylabel("Correlation")
+plot_save(plt, "41_demand_autocorr.png")
+
+# -------------------- 9) WEEKLY / MONTHLY AGGREGATIONS ----------------
+weekly = trips.set_index("d")[DEMAND_COL].resample("W").sum().reset_index()
+monthly = trips.set_index("d")[DEMAND_COL].resample("MS").sum().reset_index()
+save_table(weekly,  "50_weekly_demand_sum")
+save_table(monthly, "51_monthly_demand_sum")
+
+plt.figure(figsize=(12,4))
+plt.plot(weekly["d"], weekly[DEMAND_COL], linewidth=1.6)
+plt.title("Weekly Demand (Sum)"); plt.xlabel("Week"); plt.ylabel("Demand")
+plt.grid(True, alpha=0.3)
+plot_save(plt, "52_weekly_demand_sum.png")
+
+plt.figure(figsize=(12,4))
+plt.plot(monthly["d"], monthly[DEMAND_COL], linewidth=1.6)
+plt.title("Monthly Demand (Sum)"); plt.xlabel("Month"); plt.ylabel("Demand")
+plt.grid(True, alpha=0.3)
+plot_save(plt, "53_monthly_demand_sum.png")
+
+# -------------------- 10) MODELING BASE EXPORT ------------------------
+# Demand + Weather merged by 'd' (if weather exists)
+if weather is not None and "d" in weather.columns:
+    modeling_base = pd.merge(trips[["d", DEMAND_COL]], weather, on="d", how="left")
+else:
+    modeling_base = trips[["d", DEMAND_COL]].copy()
+save_table(modeling_base, "60_modeling_base")
+
+print(f"EDA complete. Outputs saved to: {os.path.abspath(OUT_DIR)}")
+print("Key files:\n - 10/11/12/13/41/52/53_*.png (figures)\n - 20_*.csv (weather correlations)\n - 30_*.csv (features correlations)\n - 40_*.csv (ACF)\n - 50_*,51_* (weekly/monthly)\n - 60_modeling_base.csv")
+
+
+
+# Re-executing with a fresh kernel (variables must be rebuilt from known file paths).
+# We'll load directly from the known /mnt/data CSVs that were uploaded.
+import os, re, numpy as np, pandas as pd, matplotlib.pyplot as plt
+from datetime import datetime
+
+OUT_DIR = os.path.join(os.getcwd(), "output_eda")
+os.makedirs(OUT_DIR, exist_ok=True)
+
+# Known uploaded files
+paths = {
+    "trips": "/Users/macbook/Documents/DATA PROJECT/Trips_daily.csv",
+    "weather": "/Users/macbook/Documents/DATA PROJECT/Weather.csv",
+    "features": "/Users/macbook/Documents/DATA PROJECT/FEATURES.csv",
+    "basefeat": "/Users/macbook/Documents/DATA PROJECT/BASE_FEATURES.csv",
+    "feat_flag": "/Users/macbook/Documents/DATA PROJECT/FEATURES_withflags.csv",
+    "feat_lag": "/Users/macbook/Documents/DATA PROJECT/FEATURES_withLags.csv",
+}
+
+def _load(path):
+    df = pd.read_csv(path)
+    df.columns = [re.sub(r"\s+", "_", c.strip().lower()) for c in df.columns]
+    if "d" in df.columns:
+        df["d"] = pd.to_datetime(df["d"], errors="coerce")
+    return df
+
+def safe_corr(a,b):
+    s = pd.concat([a,b], axis=1).dropna()
+    return s.corr().iloc[0,1] if s.shape[0] >= 3 else np.nan
+
+def savefig(name):
+    p = os.path.join(OUT_DIR, name)
+    plt.tight_layout()
+    plt.savefig(p, dpi=150, bbox_inches="tight")
+    plt.show()
+    return p
+
+# Load
+trips = _load(paths["trips"]).sort_values("d").dropna(subset=["d"]).reset_index(drop=True)
+weather = _load(paths["weather"])
+features = _load(paths["features"])
+basefeat = _load(paths["basefeat"])
+feat_flag = _load(paths["feat_flag"])
+feat_lag = _load(paths["feat_lag"])
+
+DEMAND = "trips_total" if "trips_total" in trips.columns else None
+assert DEMAND is not None, "Demand column not found."
+
+# Calendar
+trips["year"]  = trips["d"].dt.year
+trips["month"] = trips["d"].dt.month
+trips["day"]   = trips["d"].dt.day
+
+# Monthly totals for 2024, 2025
+mask_24_25 = trips["year"].isin([2024, 2025])
+mth_total = (trips.loc[mask_24_25].groupby(["year","month"], as_index=False)[DEMAND].sum())
+#display_dataframe_to_user("Total Demand by Month (2024–2025)", mth_total)
+
+months = np.arange(1,13)
+fig, ax = plt.subplots(figsize=(12,5))
+w = 0.4
+for i, yr in enumerate([2024, 2025]):
+    dfy = mth_total[mth_total["year"]==yr].set_index("month").reindex(months).fillna(0)
+    ax.bar(months+(i-0.5)*w, dfy[DEMAND].values, width=w, label=str(yr))
+ax.set_title("Total Demand by Month (2024 vs 2025)")
+ax.set_xlabel("Month"); ax.set_ylabel("Total Demand"); ax.set_xticks(months)
+ax.legend()
+savefig("01_total_demand_by_month_2024_2025.png")
+
+# Monthly averages 2024–2025
+mth_avg = (trips.loc[mask_24_25].groupby(["year","month"], as_index=False)[DEMAND].mean())
+#display_dataframe_to_user("Average Demand by Month (2024–2025)", mth_avg)
+
+fig, ax = plt.subplots(figsize=(12,5))
+for yr in [2024, 2025]:
+    dfy = mth_avg[mth_avg["year"]==yr].set_index("month").reindex(months).fillna(np.nan)
+    ax.plot(months, dfy[DEMAND].values, marker="o", linewidth=2, label=str(yr))
+ax.set_title("Average Demand by Month (2024–2025)")
+ax.set_xlabel("Month"); ax.set_ylabel("Average Daily Demand"); ax.set_xticks(months)
+ax.legend()
+savefig("02_avg_demand_by_month_2024_2025.png")
+
+# Average demand by day in some 2025 months (take first 3 months with data)
+sel_months_2025 = sorted(set(trips.loc[trips["year"]==2025, "month"]))[:3]
+daily_tables = []
+for m in sel_months_2025:
+    dly = (trips[(trips["year"]==2025) & (trips["month"]==m)]
+                 .groupby("day", as_index=False)[DEMAND].mean())
+    dly["month"] = m
+    daily_tables.append(dly)
+if daily_tables:
+    daily_summary = pd.concat(daily_tables, ignore_index=True)
+    #display_dataframe_to_user("Average Demand by Day (Selected Months in 2025)", daily_summary)
+    for m in sel_months_2025:
+        dly = daily_summary[daily_summary["month"]==m]
+        fig, ax = plt.subplots(figsize=(10,4))
+        ax.plot(dly["day"], dly[DEMAND], marker="o", linewidth=1.8)
+        ax.set_title(f"Average Demand by Day — 2025-{m:02d}")
+        ax.set_xlabel("Day of Month"); ax.set_ylabel("Average Demand")
+        ax.set_xticks(dly["day"].values)
+        savefig(f"03_avg_demand_by_day_2025_{m:02d}.png")
+
+# Highest-demand days (2024–2025)
+top_days = (trips[mask_24_25][["d", DEMAND]].sort_values(DEMAND, ascending=False).head(15).reset_index(drop=True))
+#display_dataframe_to_user("Top 15 Highest-Demand Days (2024–2025)", top_days)
+
+# Correlations: weather and macro indicators (unrate, payems, cpi, fefunds)
+# Compose unified features
+econ_all = features
+for df in [basefeat, feat_flag, feat_lag]:
+    econ_all = pd.merge(econ_all, df, on="d", how="outer", suffixes=("", "_dup"))
+    dup_cols = [c for c in econ_all.columns if c.endswith("_dup")]
+    if dup_cols:
+        econ_all.drop(columns=dup_cols, inplace=True, errors="ignore")
+
+merged = trips[["d", DEMAND]].copy()
+merged = pd.merge(merged, weather, on="d", how="left", suffixes=("", "_w"))
+merged = pd.merge(merged, econ_all, on="d", how="left", suffixes=("", "_e"))
+
+# Weather correlations
+weather_cols = [c for c in weather.columns if c != "d" and pd.api.types.is_numeric_dtype(weather[c])]
+corr_weather = [(c, safe_corr(merged[DEMAND], merged[c])) for c in weather_cols]
+corr_weather_df = pd.DataFrame(corr_weather, columns=["weather_var","pearson_r"]).sort_values("pearson_r", key=lambda s: s.abs(), ascending=False)
+#display_dataframe_to_user("Correlation: Demand vs Weather", corr_weather_df)
+
+# Macro correlations
+def pick_col(df, key):
+    # choose shortest matching column name
+    cand = [c for c in df.columns if re.search(key, c, re.IGNORECASE)]
+    return sorted(cand, key=len)[0] if cand else None
+
+macro_map = {k: pick_col(merged, k) for k in ["unrate","payems","cpi","fefunds"]}
+corr_macro = []
+for k, col in macro_map.items():
+    if col is not None and pd.api.types.is_numeric_dtype(merged[col]):
+        corr_macro.append((k, col, safe_corr(merged[DEMAND], merged[col])))
+corr_macro_df = pd.DataFrame(corr_macro, columns=["indicator_key","column","pearson_r"]).sort_values("pearson_r", key=lambda s: s.abs(), ascending=False)
+#display_dataframe_to_user("Correlation: Demand vs Macro (unrate, payems, cpi, fefunds)", corr_macro_df)
+
+# Scatter plots: top 4 weather + each macro
+for var in corr_weather_df["weather_var"].head(4):
+    ss = merged[[DEMAND, var]].dropna()
+    if ss.shape[0] >= 20:
+        fig, ax = plt.subplots(figsize=(6,4))
+        ax.scatter(ss[var], ss[DEMAND], alpha=0.35)
+        ax.set_title(f"Demand vs {var} (r={safe_corr(ss[DEMAND], ss[var]):.2f})")
+        ax.set_xlabel(var); ax.set_ylabel("Demand")
+        savefig(f"04_scatter_demand_vs_weather_{var}.png")
+
+for k, col in macro_map.items():
+    if col is None: 
+        continue
+    ss = merged[[DEMAND, col]].dropna()
+    if ss.shape[0] >= 20:
+        fig, ax = plt.subplots(figsize=(6,4))
+        ax.scatter(ss[col], ss[DEMAND], alpha=0.35)
+        ax.set_title(f"Demand vs {k.upper()} [{col}] (r={safe_corr(ss[DEMAND], ss[col]):.2f})")
+        ax.set_xlabel(col); ax.set_ylabel("Demand")
+        savefig(f"05_scatter_demand_vs_macro_{k}.png")
+
+print("All visuals & tables ready at:", OUT_DIR)
